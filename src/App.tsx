@@ -2,18 +2,17 @@ import React from 'react';
 import FishBehaviorPrediction from './components/FishBehaviorPrediction';
 
 function App() {
-  // Example data - in a real app, this would come from your backend/Firebase
-  const predictionData = {
-    imageUrl: "https://images.unsplash.com/photo-1524704796725-9fc3044a58b2?auto=format&fit=crop&w=800&q=80",
-    filename: "tropical_fish_001.jpg",
-    pattern: "Swimming Straight",
-    confidence: 92
-  };
+  // Example Firebase image URL
+  const imageUrl = "https://firebasestorage.googleapis.com/v0/b/fish-detection-86201/o/images%2F00135.jpg?alt=media&token=cae4f1be-d715-421d-bc27-e04d6c1ec66b";
 
   return (
-    <div className="min-h-screen bg-gray-100 py-8">
-      <FishBehaviorPrediction {...predictionData} />
-    </div>
+      <div className="App">
+        <FishBehaviorPrediction
+            imageUrl={imageUrl}
+            filename="fish_image.jpg"
+            apiEndpoint="http://127.0.0.1:5000/predict-from-url"
+        />
+      </div>
   );
 }
 
