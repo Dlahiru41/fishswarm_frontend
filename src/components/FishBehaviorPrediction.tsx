@@ -1,20 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import {  getPredictionHistory, PredictionRecord } from '../services/predictionService';
 
-// Interface for historical prediction data
-interface HistoricalPrediction {
-  timestamp: string;
-  filename: string;
-  pattern: string;
-  confidence: number;
-  imageUrl: string;
-}
+import { db } from '../config/firebase';
+import { collection, addDoc, Timestamp } from 'firebase/firestore';
 
-// Extended props interface to include API endpoint and history endpoint
+// Extended props interface to include API endpoint
 interface FishPredictionProps {
   imageUrl: string;        // Firebase image URL
   filename: string;        // Image filename
   apiEndpoint?: string;    // Optional API endpoint for prediction
-  historyEndpoint?: string; // Optional API endpoint for historical data
   initialPattern?: string; // Optional initial pattern (if already known)
   initialConfidence?: number; // Optional initial confidence (if already known)
 }
@@ -23,7 +17,6 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                                                                  imageUrl,
                                                                  filename,
                                                                  apiEndpoint = 'http://127.0.0.1:5000/predict-from-url',
-                                                                 historyEndpoint = 'http://127.0.0.1:5000/prediction-history',
                                                                  initialPattern,
                                                                  initialConfidence
                                                                }) => {
@@ -32,54 +25,74 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
   const [confidence, setConfidence] = useState<number>(initialConfidence || 0);
   const [isLoading, setIsLoading] = useState<boolean>(!initialPattern);
   const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // State for historical data
+  const [historicalData, setHistoricalData] = useState<PredictionRecord[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+
+  // Flag to use sample data instead of Firebase (for development)
+  const [useSampleData, setUseSampleData] = useState<boolean>(false);
 
   // Sample historical data for development/testing
-  const sampleHistoricalData: HistoricalPrediction[] = [
+  const sampleHistoricalData: PredictionRecord[] = [
     {
-      timestamp: new Date(Date.now() - 86400000 * 2).toISOString(), // 2 days ago
+      timestamp: new Date(Date.now() - 86400000 * 2), // 2 days ago
       filename: 'goldfish_1.jpg',
       pattern: 'Swimming Straight',
       confidence: 92,
       imageUrl: 'https://firebasestorage.example.com/fish/zebrafish_sample1.jpg'
     },
     {
-      timestamp: new Date(Date.now() - 86400000 * 1).toISOString(), // 1 day ago
+      timestamp: new Date(Date.now() - 86400000 * 1), // 1 day ago
       filename: 'goldfish_2.jpg',
       pattern: 'Turning',
       confidence: 87,
       imageUrl: 'https://firebasestorage.example.com/fish/goldfish_turning_behavior.jpg'
     },
-    {
-      timestamp: new Date(Date.now() - 3600000 * 5).toISOString(), // 5 hours ago
-      filename: 'goldfish_3.jpg',
-      pattern: 'Clustering',
-      confidence: 95,
-      imageUrl: 'https://firebasestorage.example.com/fish/tetra_school_feeding.jpg'
-    },
-    {
-      timestamp: new Date(Date.now() - 3600000 * 2).toISOString(), // 2 hours ago
-      filename: 'goldfish_4.jpg',
-      pattern: 'Swimming Straight',
-      confidence: 78,
-      imageUrl: 'https://firebasestorage.example.com/fish/betta_exploration.jpg'
-    },
-    {
-      timestamp: new Date(Date.now() - 1800000).toISOString(), // 30 minutes ago
-      filename: 'goldfish_5.jpg',
-      pattern: 'Turning',
-      confidence: 89,
-      imageUrl: 'https://firebasestorage.example.com/fish/guppy_mating_display.jpg'
-    }
+    // Other sample data...
   ];
 
-  // State for historical data
-  const [historicalData, setHistoricalData] = useState<HistoricalPrediction[]>([]);
-  const [isHistoryLoading, setIsHistoryLoading] = useState<boolean>(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const [showHistory, setShowHistory] = useState<boolean>(false);
+  // This function directly saves to Firestore within the component
+  const savePredictionToFirebase = async (
+      patternValue: string,
+      confidenceValue: number
+  ) => {
+    try {
+      setSaveStatus("Saving prediction to Firestore...");
+      console.log("Attempting to save prediction to Firestore");
 
-  // Flag to use sample data instead of API (for development)
-  const [useSampleData, setUseSampleData] = useState<boolean>(true);
+      // Create prediction record
+      const predictionData = {
+        timestamp: Timestamp.fromDate(new Date()),
+        filename: filename,
+        pattern: patternValue,
+        confidence: confidenceValue,
+        imageUrl: imageUrl
+      };
+
+      console.log("Prediction data:", predictionData);
+
+      // Directly add document to collection
+      const docRef = await addDoc(collection(db, 'fishPredictions'), predictionData);
+
+      console.log("Prediction saved to Firestore with ID:", docRef.id);
+      setSaveStatus("Prediction saved successfully!");
+
+      // If history is already shown, refresh the history data
+      if (showHistory && !useSampleData) {
+        fetchHistoricalData();
+      }
+
+      return docRef.id;
+    } catch (err) {
+      console.error("Failed to save prediction to Firebase:", err);
+      setSaveStatus(`Error saving prediction: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      throw err;
+    }
+  };
 
   // Run prediction when component mounts or imageUrl changes
   useEffect(() => {
@@ -125,9 +138,20 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
           // Add more mappings as needed
         };
 
+        // Get pattern name
+        const patternName = patternMap[result.pattern] || `Pattern ${result.pattern}`;
+
+        // Get confidence percentage
+        const confidencePercentage = Math.round(result.confidence * 100);
+
         // Update state with prediction results
-        setPattern(patternMap[result.pattern] || `Pattern ${result.pattern}`);
-        setConfidence(Math.round(result.confidence * 100)); // Convert to percentage
+        setPattern(patternName);
+        setConfidence(confidencePercentage);
+
+        // Save prediction to Firebase
+        savePredictionToFirebase(patternName, confidencePercentage)
+            .then(() => console.log("Prediction saved successfully"))
+            .catch(err => console.error("Error saving prediction:", err));
       } catch (err) {
         setError(`Prediction failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
         setPattern('Error');
@@ -140,7 +164,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     runPrediction();
   }, [imageUrl, filename, apiEndpoint, initialPattern, initialConfidence]);
 
-  // Fetch historical prediction data
+  // Fetch historical prediction data from Firebase
   const fetchHistoricalData = async () => {
     setIsHistoryLoading(true);
     setHistoryError(null);
@@ -155,25 +179,43 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
       return;
     }
 
-    // Real API call for production
+    // Real Firebase fetch for production
     try {
-      const response = await fetch(historyEndpoint, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`History API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      setHistoricalData(data);
+      const history = await getPredictionHistory(20); // Get last 20 predictions
+      setHistoricalData(history);
     } catch (err) {
       setHistoryError(`Failed to load historical data: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setIsHistoryLoading(false);
+    }
+  };
+
+  // Function to manually test saving to Firebase
+  const testFirebaseSave = async () => {
+    try {
+      setSaveStatus("Testing Firebase connection...");
+
+      const testPrediction = {
+        timestamp: Timestamp.fromDate(new Date()),
+        filename: 'test-fish.jpg',
+        pattern: 'Test Pattern',
+        confidence: 99,
+        imageUrl: 'https://example.com/test-fish.jpg'
+      };
+
+      // Directly save to Firestore
+      const docRef = await addDoc(collection(db, 'fishPredictions'), testPrediction);
+
+      console.log("Test document written with ID:", docRef.id);
+      setSaveStatus("Test successful! Check your Firestore database.");
+
+      // Refresh history if showing
+      if (showHistory) {
+        fetchHistoricalData();
+      }
+    } catch (err) {
+      console.error("Test save failed:", err);
+      setSaveStatus(`Test failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
   };
 
@@ -254,8 +296,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
   };
 
   // Format date for display
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+  const formatDate = (date: Date) => {
     return new Intl.DateTimeFormat('en-US', {
       month: 'short',
       day: 'numeric',
@@ -321,12 +362,27 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
               <p className="text-sm">{getBehaviorDescription(pattern)}</p>
             </div>
 
+            {/* Firestore save status */}
+            {saveStatus && (
+                <div className={`mt-4 p-3 ${saveStatus.includes('Error') ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'} rounded-md mb-4`}>
+                  <p className="text-sm">{saveStatus}</p>
+                </div>
+            )}
+
             {/* Error message if any */}
             {error && (
-                <div className="mt-4 p-3 bg-red-100 text-red-800 rounded-md">
+                <div className="mt-4 p-3 bg-red-100 text-red-800 rounded-md mb-4">
                   <p className="text-sm">{error}</p>
                 </div>
             )}
+
+            {/* Test Firebase button */}
+            <button
+                onClick={testFirebaseSave}
+                className="w-full py-2 px-4 bg-blue-500 hover:bg-blue-600 text-white rounded-md mb-4"
+            >
+              Test Firebase Connection
+            </button>
 
             {/* Toggle button for historical data */}
             <button
@@ -348,7 +404,13 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                   <div className="mr-3 flex items-center">
                     <span className="text-xs text-gray-500 mr-2">Sample Data</span>
                     <button
-                        onClick={() => setUseSampleData(!useSampleData)}
+                        onClick={() => {
+                          setUseSampleData(!useSampleData);
+                          // Trigger data fetch when toggle changes
+                          if (!useSampleData) {
+                            setHistoricalData([]); // Clear existing data
+                          }
+                        }}
                         className={`relative inline-flex h-5 w-10 items-center rounded-full ${useSampleData ? 'bg-blue-600' : 'bg-gray-200'}`}
                     >
                   <span
