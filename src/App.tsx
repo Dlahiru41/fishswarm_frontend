@@ -1,9 +1,9 @@
-import React from 'react';
+// import React from 'react';
 import FishBehaviorPrediction from './components/FishBehaviorPrediction';
 
 function App() {
   // Example Firebase image URL
-  const imageUrl = "https://firebasestorage.googleapis.com/v0/b/fish-detection-86201/o/images%2F00135.jpg?alt=media&token=cae4f1be-d715-421d-bc27-e04d6c1ec66b";
+  const imageUrl = "https://firebasestorage.googleapis.com/v0/b/fish-detection-86201/o/images%2F03665.jpg?alt=media&token=bf7605af-ac3b-4e7c-8f09-0c11c6985619";
 
   return (
       <div className="App">
