@@ -12,15 +12,17 @@ interface FishPredictionProps {
   initialPattern?: string; // Optional initial pattern (if already known)
   initialConfidence?: number; // Optional initial confidence (if already known)
   refreshInterval?: number; // Optional refresh interval in milliseconds (default: 5 minutes)
+  onRefresh?: () => Promise<string>; // Optional callback to get a fresh image URL
 }
 
 const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
-                                                                 imageUrl,
+                                                                 imageUrl: initialImageUrl,
                                                                  filename,
                                                                  apiEndpoint = 'http://127.0.0.1:5000/predict-from-url',
                                                                  initialPattern,
                                                                  initialConfidence,
-                                                                 refreshInterval = 5 * 60 * 1000 // Default: 5 minutes in milliseconds
+                                                                 refreshInterval = 5 * 60 * 1000, // Default: 5 minutes in milliseconds
+                                                                 onRefresh
                                                                }) => {
   // State for prediction results
   const [pattern, setPattern] = useState<string>(initialPattern || 'Loading...');
@@ -28,6 +30,11 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(!initialPattern);
   const [error, setError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // Add state for the image URL so we can update it
+  const [imageUrl, setImageUrl] = useState<string>(initialImageUrl);
+  // Add a timestamp for cache busting
+  const [imageTimestamp, setImageTimestamp] = useState<number>(Date.now());
 
   // State for refresh timer
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
@@ -63,6 +70,13 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     // Other sample data...
   ];
 
+  // Helper function to add a cache busting parameter to a URL
+  const addCacheBuster = useCallback((url: string): string => {
+    // Check if URL already contains query parameters
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}t=${imageTimestamp}`;
+  }, [imageTimestamp]);
+
   // This function directly saves to Firestore within the component
   const savePredictionToFirebase = async (
       patternValue: string,
@@ -78,7 +92,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
         filename: filename,
         pattern: patternValue,
         confidence: confidenceValue,
-        imageUrl: imageUrl
+        imageUrl: imageUrl // Store original URL without cache busting
       };
 
       console.log("Prediction data:", predictionData);
@@ -102,18 +116,39 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     }
   };
 
+  // Function to refresh the image URL
+  const refreshImageUrl = useCallback(async () => {
+    // Update timestamp for cache busting
+    setImageTimestamp(Date.now());
+
+    if (onRefresh) {
+      try {
+        const newImageUrl = await onRefresh();
+        setImageUrl(newImageUrl);
+        return newImageUrl;
+      } catch (err) {
+        console.error("Failed to refresh image URL:", err);
+        return imageUrl; // Return current URL if refresh fails
+      }
+    }
+    return imageUrl; // Return current URL if no refresh callback
+  }, [onRefresh, imageUrl]);
+
   // Run prediction - extracted as a reusable function
   const runPrediction = useCallback(async () => {
-    if (!imageUrl) {
-      setError('No image URL provided');
-      setIsLoading(false);
-      return;
-    }
-
     setIsLoading(true);
     setError(null);
 
     try {
+      // First, try to get a fresh image URL
+      const currentImageUrl = await refreshImageUrl();
+
+      if (!currentImageUrl) {
+        setError('No image URL available');
+        setIsLoading(false);
+        return;
+      }
+
       // Instead of fetching the image ourselves, send the URL to the API
       const response = await fetch(apiEndpoint, {
         method: 'POST',
@@ -121,7 +156,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          imageUrl: imageUrl,
+          imageUrl: currentImageUrl, // Send original URL to the API
           filename: filename
         }),
       });
@@ -165,7 +200,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     } finally {
       setIsLoading(false);
     }
-  }, [imageUrl, filename, apiEndpoint]);
+  }, [imageUrl, filename, apiEndpoint, refreshImageUrl]);
 
   // Initial prediction on component mount or when imageUrl changes
   useEffect(() => {
@@ -175,7 +210,7 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     }
 
     runPrediction();
-  }, [imageUrl, filename, initialPattern, initialConfidence, runPrediction]);
+  }, [initialImageUrl, filename, initialPattern, initialConfidence, runPrediction]);
 
   // Setup auto-refresh timer
   useEffect(() => {
@@ -377,9 +412,10 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
             <div className="flex items-center justify-center p-2">
               {imageUrl ? (
                   <img
-                      src={imageUrl}
+                      src={addCacheBuster(imageUrl)}
                       alt="Fish image from Firebase"
                       className="max-h-48 object-contain"
+                      key={`${imageUrl}-${imageTimestamp}`} // Add timestamp to force re-render
                   />
               ) : (
                   <div className="text-gray-400">Image not available</div>
@@ -408,7 +444,11 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                 />
                 </button>
                 <button
-                    onClick={() => runPrediction()}
+                    onClick={() => {
+                      // Force new timestamp for manual refresh
+                      setImageTimestamp(Date.now());
+                      runPrediction();
+                    }}
                     disabled={isLoading}
                     className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-full"
                     title="Refresh now"
@@ -533,6 +573,10 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                     <div className="space-y-4 max-h-96 overflow-y-auto">
                       {historicalData.map((item, index) => {
                         const itemStyles = getPatternStyles(item.pattern);
+                        // Add timestamp to history image URLs as well
+                        const historyCacheBustedUrl = item.imageUrl ?
+                            `${item.imageUrl}${item.imageUrl.includes('?') ? '&' : '?'}t=${imageTimestamp}` : '';
+
                         return (
                             <div key={index} className="border rounded-lg overflow-hidden">
                               <div className={`${itemStyles.bgColor} ${itemStyles.textColor} px-4 py-2 border-b ${itemStyles.borderColor} flex justify-between items-center`}>
@@ -553,9 +597,10 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                                       </div>
                                   ) : (
                                       <img
-                                          src={item.imageUrl}
+                                          src={historyCacheBustedUrl}
                                           alt={`Fish image: ${item.filename}`}
                                           className="w-full h-20 object-cover rounded"
+                                          key={`${item.imageUrl}-${imageTimestamp}`} // Add timestamp to force re-render
                                       />
                                   )}
                                 </div>
