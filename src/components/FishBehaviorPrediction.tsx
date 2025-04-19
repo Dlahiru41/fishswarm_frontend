@@ -1,16 +1,17 @@
-import React, { useState, useEffect } from 'react';
-import {  getPredictionHistory, PredictionRecord } from '../services/predictionService';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { getPredictionHistory, PredictionRecord } from '../services/predictionService';
 
 import { db } from '../config/firebase';
 import { collection, addDoc, Timestamp } from 'firebase/firestore';
 
-// Extended props interface to include API endpoint
+// Extended props interface to include API endpoint and refresh interval
 interface FishPredictionProps {
   imageUrl: string;        // Firebase image URL
   filename: string;        // Image filename
   apiEndpoint?: string;    // Optional API endpoint for prediction
   initialPattern?: string; // Optional initial pattern (if already known)
   initialConfidence?: number; // Optional initial confidence (if already known)
+  refreshInterval?: number; // Optional refresh interval in milliseconds (default: 5 minutes)
 }
 
 const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
@@ -18,14 +19,21 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                                                                  filename,
                                                                  apiEndpoint = 'http://127.0.0.1:5000/predict-from-url',
                                                                  initialPattern,
-                                                                 initialConfidence
+                                                                 initialConfidence,
+                                                                 refreshInterval = 5 * 60 * 1000 // Default: 5 minutes in milliseconds
                                                                }) => {
   // State for prediction results
   const [pattern, setPattern] = useState<string>(initialPattern || 'Loading...');
-  const [confidence, setConfidence] = useState<number>(initialConfidence || 0);
+  // const [confidence, setConfidence] = useState<number>(initialConfidence || 0);
   const [isLoading, setIsLoading] = useState<boolean>(!initialPattern);
   const [error, setError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // State for refresh timer
+  const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
+  const [timeUntilNextRefresh, setTimeUntilNextRefresh] = useState<number>(refreshInterval);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState<boolean>(true);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // State for historical data
   const [historicalData, setHistoricalData] = useState<PredictionRecord[]>([]);
@@ -41,14 +49,14 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     {
       timestamp: new Date(Date.now() - 86400000 * 2), // 2 days ago
       filename: 'goldfish_1.jpg',
-      pattern: 'Swimming Straight',
+      pattern: 'Normal Swarm',
       confidence: 92,
       imageUrl: 'https://firebasestorage.example.com/fish/zebrafish_sample1.jpg'
     },
     {
       timestamp: new Date(Date.now() - 86400000 * 1), // 1 day ago
       filename: 'goldfish_2.jpg',
-      pattern: 'Turning',
+      pattern: 'Erratic Movement',
       confidence: 87,
       imageUrl: 'https://firebasestorage.example.com/fish/goldfish_turning_behavior.jpg'
     },
@@ -94,75 +102,118 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
     }
   };
 
-  // Run prediction when component mounts or imageUrl changes
+  // Run prediction - extracted as a reusable function
+  const runPrediction = useCallback(async () => {
+    if (!imageUrl) {
+      setError('No image URL provided');
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      // Instead of fetching the image ourselves, send the URL to the API
+      const response = await fetch(apiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageUrl: imageUrl,
+          filename: filename
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      // Map numerical pattern to named pattern (adjust based on your model output)
+      const patternMap: { [key: number]: string } = {
+        1: 'Normal Swarm',
+        2: 'Erratic Movement',
+        3: 'Clustering',
+        // Add more mappings as needed
+      };
+
+      // Get pattern name
+      const patternName = patternMap[result.pattern] || `Pattern ${result.pattern}`;
+
+      // Get confidence percentage
+      const confidencePercentage = Math.round(result.confidence * 100);
+
+      // Update state with prediction results
+      setPattern(patternName);
+      // setConfidence(confidencePercentage);
+
+      // Update last refresh time
+      const now = new Date();
+      setLastRefreshTime(now);
+
+      // Save prediction to Firebase
+      savePredictionToFirebase(patternName, confidencePercentage)
+          .then(() => console.log("Prediction saved successfully"))
+          .catch(err => console.error("Error saving prediction:", err));
+    } catch (err) {
+      setError(`Prediction failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setPattern('Error');
+      // setConfidence(0);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [imageUrl, filename, apiEndpoint]);
+
+  // Initial prediction on component mount or when imageUrl changes
   useEffect(() => {
     // Skip prediction if initial values were provided
     if (initialPattern && initialConfidence !== undefined) {
       return;
     }
 
-    const runPrediction = async () => {
-      if (!imageUrl) {
-        setError('No image URL provided');
-        setIsLoading(false);
-        return;
-      }
+    runPrediction();
+  }, [imageUrl, filename, initialPattern, initialConfidence, runPrediction]);
 
-      setIsLoading(true);
-      setError(null);
+  // Setup auto-refresh timer
+  useEffect(() => {
+    // Clear existing timer
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
 
-      try {
-        // Instead of fetching the image ourselves, send the URL to the API
-        const response = await fetch(apiEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            imageUrl: imageUrl,
-            filename: filename
-          }),
-        });
+    // Update countdown every second
+    const countdownTimer = setInterval(() => {
+      if (autoRefreshEnabled) {
+        const elapsed = new Date().getTime() - lastRefreshTime.getTime();
+        const remaining = Math.max(0, refreshInterval - elapsed);
+        setTimeUntilNextRefresh(remaining);
 
-        if (!response.ok) {
-          throw new Error(`API error: ${response.status}`);
+        // If it's time to refresh
+        if (remaining === 0) {
+          runPrediction();
         }
+      }
+    }, 1000);
 
-        const result = await response.json();
+    // Set main refresh timer
+    if (autoRefreshEnabled) {
+      timerRef.current = setInterval(() => {
+        runPrediction();
+      }, refreshInterval);
+    }
 
-        // Map numerical pattern to named pattern (adjust based on your model output)
-        const patternMap: { [key: number]: string } = {
-          1: 'Swimming Straight',
-          2: 'Turning',
-          3: 'Clustering',
-          // Add more mappings as needed
-        };
-
-        // Get pattern name
-        const patternName = patternMap[result.pattern] || `Pattern ${result.pattern}`;
-
-        // Get confidence percentage
-        const confidencePercentage = Math.round(result.confidence * 100);
-
-        // Update state with prediction results
-        setPattern(patternName);
-        setConfidence(confidencePercentage);
-
-        // Save prediction to Firebase
-        savePredictionToFirebase(patternName, confidencePercentage)
-            .then(() => console.log("Prediction saved successfully"))
-            .catch(err => console.error("Error saving prediction:", err));
-      } catch (err) {
-        setError(`Prediction failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        setPattern('Error');
-        setConfidence(0);
-      } finally {
-        setIsLoading(false);
+    // Cleanup on unmount
+    return () => {
+      clearInterval(countdownTimer);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
       }
     };
-
-    runPrediction();
-  }, [imageUrl, filename, apiEndpoint, initialPattern, initialConfidence]);
+  }, [autoRefreshEnabled, lastRefreshTime, refreshInterval, runPrediction]);
 
   // Fetch historical prediction data from Firebase
   const fetchHistoricalData = async () => {
@@ -230,14 +281,14 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
   // Visual styling based on pattern type
   const getPatternStyles = (patternType: string) => {
     switch(patternType) {
-      case 'Swimming Straight':
+      case 'Normal Swarm':
         return {
           bgColor: 'bg-blue-100',
           textColor: 'text-blue-800',
           borderColor: 'border-blue-300',
           icon: '→'
         };
-      case 'Turning':
+      case 'Erratic Movement':
         return {
           bgColor: 'bg-green-100',
           textColor: 'text-green-800',
@@ -280,12 +331,12 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
   // Get behavior description based on pattern
   const getBehaviorDescription = (patternType: string) => {
     switch(patternType) {
-      case 'Swimming Straight':
-        return "Fish swimming in a straight line with regular tail movements and stable orientation.";
-      case 'Turning':
-        return "Fish changing direction with asymmetrical body curvature and angled orientation.";
+      case 'Normal Swarm':
+        return "The fish are swimming together in a coordinated manner, indicating natural schooling behavior. This behavior persists and is consistent, the tank environment seems to be stable, with no signs of stress or external factors disturbing the fish.";
+      case 'Erratic Movement':
+        return "The fish are moving in irregular, chaotic, and disjointed patterns. This behavior is a strong signal that the fish are experiencing discomfort or stress. If this is a frequent or persistent behavior, immediate attention to water quality, tank temperature, and overall tank conditions is necessary.";
       case 'Clustering':
-        return "Fish exhibiting typical feeding behavior with vertical orientation and mouth movements.";
+        return "Fish are grouped together but not moving cohesively. They appear to be in close proximity but may not be swimming in sync. This behavior is occasional, it might not indicate a major health issue, but it could suggest water quality fluctuations, a change in food patterns, or other mild disturbances.";
       case 'Loading...':
         return "Analyzing fish behavior pattern...";
       case 'Error':
@@ -304,6 +355,14 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
       hour: '2-digit',
       minute: '2-digit'
     }).format(date);
+  };
+
+  // Format time remaining in MM:SS format
+  const formatTimeRemaining = (milliseconds: number) => {
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
   return (
@@ -328,6 +387,43 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
             </div>
           </div>
 
+          {/* Auto-refresh controls */}
+          <div className="p-3 bg-blue-50 border-b border-blue-100">
+            <div className="flex justify-between items-center">
+              <div>
+                <div className="text-sm font-medium text-blue-800">Auto Refresh</div>
+                <div className="text-xs text-blue-600">
+                  {autoRefreshEnabled
+                      ? `Next refresh in ${formatTimeRemaining(timeUntilNextRefresh)}`
+                      : 'Auto refresh disabled'}
+                </div>
+              </div>
+              <div className="flex items-center space-x-3">
+                <button
+                    onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                    className={`relative inline-flex h-5 w-10 items-center rounded-full ${autoRefreshEnabled ? 'bg-blue-600' : 'bg-gray-200'}`}
+                >
+                <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${autoRefreshEnabled ? 'translate-x-5' : 'translate-x-1'}`}
+                />
+                </button>
+                <button
+                    onClick={() => runPrediction()}
+                    disabled={isLoading}
+                    className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-full"
+                    title="Refresh now"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 text-xs text-gray-500">
+              Last updated: {formatDate(lastRefreshTime)}
+            </div>
+          </div>
+
           {/* Prediction result */}
           <div className="p-6">
             <div className="mb-4">
@@ -344,22 +440,11 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
             </div>
 
             <div className="mb-6">
-              <div className="text-sm text-gray-500">Confidence</div>
-              <div className="mt-1 w-full bg-gray-200 rounded-full h-4">
-                <div
-                    className={`${isLoading ? 'bg-gray-400 animate-pulse' : 'bg-blue-600'} h-4 rounded-full`}
-                    style={{ width: `${confidence}%` }}
-                ></div>
+              <div className="text-sm text-gray-500">Recommendation</div>
+              <div className="mt-2 p-3 rounded-md bg-blue-50 text-blue-800 border border-blue-100">
+                <div className="font-medium mb-1">Advice:</div>
+                <p className="text-sm">{getBehaviorDescription(pattern)}</p>
               </div>
-              <div className="text-right mt-1 text-sm font-medium">
-                {isLoading ? 'Calculating...' : `${confidence}%`}
-              </div>
-            </div>
-
-            {/* Behavior description */}
-            <div className={`p-3 rounded-md ${styles.bgColor} ${styles.textColor} mb-4`}>
-              <div className="font-medium mb-1">Behavior Description:</div>
-              <p className="text-sm">{getBehaviorDescription(pattern)}</p>
             </div>
 
             {/* Firestore save status */}
@@ -478,15 +563,9 @@ const FishBehaviorPrediction: React.FC<FishPredictionProps> = ({
                                   <div className="text-xs text-gray-500">Filename</div>
                                   <div className="text-sm font-medium mb-2 truncate">{item.filename}</div>
 
-                                  <div className="text-xs text-gray-500">Confidence</div>
-                                  <div className="flex items-center">
-                                    <div className="flex-grow h-2 bg-gray-200 rounded-full mr-2">
-                                      <div
-                                          className="bg-blue-600 h-2 rounded-full"
-                                          style={{ width: `${item.confidence}%` }}
-                                      ></div>
-                                    </div>
-                                    <span className="text-xs font-medium">{item.confidence}%</span>
+                                  <div className="text-xs text-gray-500">Advice</div>
+                                  <div className="text-xs mt-1 text-blue-800">
+                                    {getBehaviorDescription(item.pattern).substring(0, 100)}...
                                   </div>
                                 </div>
                               </div>
